@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "fast-xml-parser": "^5.4.2",
+    "node-fetch": "^3.3.2",
+    "office-addin-manifest": "^2.1.2"
+  }
+}
