@@ -1,4 +1,19 @@
 {
+  "name": "officejs-manifest-validator",
+  "version": "1.1.0",
+  "description": "Validate Office Add-in XML manifests — schema checks, resource ID integrity, type-mismatch detection, URL reachability",
+  "main": "validate-manifest.mjs",
+  "bin": {
+    "officejs-validate": "./validate-manifest.mjs"
+  },
+  "type": "module",
+  "keywords": ["office", "addin", "manifest", "validator", "officejs", "xml"],
+  "author": "Elias Traunbauer",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Elias-Traunbauer/OfficeJSValidator.git"
+  },
   "dependencies": {
     "fast-xml-parser": "^5.4.2",
     "node-fetch": "^3.3.2",

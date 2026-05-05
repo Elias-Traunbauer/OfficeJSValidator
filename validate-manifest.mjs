@@ -25,9 +25,11 @@ const { values, positionals } = parseArgs({
   args: process.argv.slice(2),
   options: {
     timeout:      { type: "string",  default: "5000"  },
-    "skip-urls":  { type: "boolean", default: false   },
-    "only-local": { type: "boolean", default: false   },
-    help:         { type: "boolean", default: false   },
+    "skip-urls":     { type: "boolean", default: false   },
+    "check-images":  { type: "boolean", default: false   },
+    "only-local":    { type: "boolean", default: false   },
+    verbose:         { type: "boolean", short: "v", default: false },
+    help:            { type: "boolean", default: false   },
   },
   allowPositionals: true,
 });
@@ -39,7 +41,9 @@ Usage: node validate-manifest.mjs <manifest.xml> [options]
 Options:
   --timeout <ms>   HTTP request timeout per URL (default: 5000)
   --skip-urls      Skip URL reachability checks entirely
+  --check-images   Also probe bt:Image URLs (skipped by default)
   --only-local     Only probe localhost / 127.x.x.x URLs
+  -v, --verbose    Show informational messages
   --help           Show this help
 `);
   process.exit(0);
@@ -48,7 +52,9 @@ Options:
 const MANIFEST_PATH = positionals[0];
 const TIMEOUT_MS    = parseInt(values["timeout"], 10);
 const SKIP_URLS     = values["skip-urls"];
+const CHECK_IMAGES  = values["check-images"];
 const ONLY_LOCAL    = values["only-local"];
+const VERBOSE       = values["verbose"];
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 const C = {
@@ -69,8 +75,16 @@ const fmt = {
 const summary = { errors: 0, warnings: 0 };
 const addError   = (msg) => { summary.errors++;   console.log(fmt.fail(msg)); };
 const addWarning = (msg) => { summary.warnings++; console.log(fmt.warn(msg)); };
-const addOk      = (msg) => console.log(fmt.ok(msg));
-const addInfo    = (msg) => console.log(fmt.info(msg));
+const addOk      = (msg) => { if (VERBOSE) console.log(fmt.ok(msg)); };
+const addInfo    = (msg) => { if (VERBOSE) console.log(fmt.info(msg)); };
+
+let _stageErrors = 0, _stageWarnings = 0;
+const stageStart = () => { _stageErrors = summary.errors; _stageWarnings = summary.warnings; };
+const stageEnd   = (name) => {
+  if (summary.errors === _stageErrors && summary.warnings === _stageWarnings) {
+    console.log(fmt.ok(`${name} — passed`));
+  }
+};
 
 // ── Load & parse XML ──────────────────────────────────────────────────────────
 console.log(fmt.head("Loading manifest"));
@@ -128,6 +142,7 @@ function collectElements(obj, localName, result = []) {
 // PASS 1 — Microsoft official schema validation
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log(fmt.head("Pass 1 · Microsoft schema validation"));
+stageStart();
 
 try {
   const validation = await validateManifest(MANIFEST_PATH, false);
@@ -158,15 +173,19 @@ try {
 } catch (e) {
   addWarning(`Could not reach validation gateway: ${e.message}`);
 }
+stageEnd("Pass 1 · Microsoft schema validation");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PASS 2a — Resource ID integrity
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log(fmt.head("Pass 2a · Resource ID integrity"));
+stageStart();
 
-// Collect all declared IDs from bt:Image, bt:Url, bt:String
+// Collect all declared IDs from bt:Images, bt:Urls, bt:ShortStrings, bt:LongStrings
 const declaredResids = new Map(); // id → [elementType, ...]
-["Image", "Url", "String"].forEach(tag => {
+
+// Images and Urls are straightforward
+["Image", "Url"].forEach(tag => {
   collectElements(doc, tag).forEach(el => {
     const id = el?.["@_id"];
     if (!id) return;
@@ -175,7 +194,37 @@ const declaredResids = new Map(); // id → [elementType, ...]
   });
 });
 
-addInfo(`Declared resource IDs: ${declaredResids.size}`);
+// bt:ShortStrings and bt:LongStrings both contain bt:String children — differentiate by parent
+function collectStringsByParent(obj, result = [], parentLocal = null) {
+  if (!obj || typeof obj !== "object") return result;
+  if (Array.isArray(obj)) { obj.forEach(i => collectStringsByParent(i, result, parentLocal)); return result; }
+  for (const [k, v] of Object.entries(obj)) {
+    const local = k.includes(":") ? k.split(":").pop() : k;
+    if (local === "ShortStrings" || local === "LongStrings") {
+      // Children of this node tagged as String are short/long
+      collectStringsByParent(v, result, local);
+    } else if (local === "String" && parentLocal) {
+      const type = parentLocal === "ShortStrings" ? "ShortString" : "LongString";
+      const items = Array.isArray(v) ? v : [v];
+      items.forEach(el => {
+        const id = el?.["@_id"];
+        if (!id) return;
+        if (!declaredResids.has(id)) declaredResids.set(id, []);
+        declaredResids.get(id).push(type);
+      });
+    } else {
+      collectStringsByParent(v, result, parentLocal);
+    }
+  }
+  return result;
+}
+collectStringsByParent(doc);
+
+const strCount  = [...declaredResids.values()].filter(t => t.includes("ShortString")).length;
+const lstrCount = [...declaredResids.values()].filter(t => t.includes("LongString")).length;
+const urlCount  = [...declaredResids.values()].filter(t => t.includes("Url")).length;
+const imgCount  = [...declaredResids.values()].filter(t => t.includes("Image")).length;
+addInfo(`Declared resource IDs: ${declaredResids.size} (${strCount} ShortString, ${lstrCount} LongString, ${urlCount} Url, ${imgCount} Image)`);
 
 // Duplicate resource IDs
 const duplicateResids = [...declaredResids.entries()].filter(([, types]) => types.length > 1);
@@ -190,22 +239,83 @@ if (duplicateResids.length === 0) {
 const usedResids = new Set(collectAttribs(doc, "@_resid"));
 addInfo(`Resid references in use: ${usedResids.size}`);
 
+// ── Resource type expectations ───────────────────────────────────────────────
+const RESID_TYPE_EXPECTATIONS = {
+  Label:          "ShortString",
+  Title:          "ShortString",
+  Description:    "LongString",
+  FunctionFile:   "Url",
+  SourceLocation: "Url",
+  Icon:           "Image",
+  Image:          "Image",
+};
+
+// Walk the parsed doc looking for elements with a resid attribute
+function collectResidUsages(obj, parentName = null, result = []) {
+  if (!obj || typeof obj !== "object") return result;
+  if (Array.isArray(obj)) { obj.forEach(i => collectResidUsages(i, parentName, result)); return result; }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === "@_resid") {
+      result.push({ parent: parentName, resid: String(v) });
+    } else {
+      const local = k.includes(":") ? k.split(":").pop() : k;
+      collectResidUsages(v, local, result);
+    }
+  }
+  return result;
+}
+
+const residUsages = collectResidUsages(doc);
+
+// Build a lookup: resid → expected type (from the element that references it)
+const residExpectedType = new Map();
+residUsages.forEach(({ parent, resid }) => {
+  const expected = RESID_TYPE_EXPECTATIONS[parent];
+  if (expected) residExpectedType.set(resid, expected);
+});
+
 // Broken: resid that points to no declared ID
 const broken = [...usedResids].filter(id => !declaredResids.has(id));
-broken.length === 0
-  ? addOk("All resid references resolve to a declared resource")
-  : broken.forEach(id => addError(`Unresolved resid="${id}" — no matching resource declared`));
+if (broken.length === 0) {
+  addOk("All resid references resolve to a declared resource");
+} else {
+  broken.forEach(id => {
+    const expected = residExpectedType.get(id);
+    const hint = expected ? ` (expected in ${expected === "ShortString" ? "bt:ShortStrings" : expected === "LongString" ? "bt:LongStrings" : "bt:" + expected + "s"})` : "";
+    addError(`Unresolved resid="${id}" — no matching resource declared${hint}`);
+  });
+}
 
 // Orphaned: declared but never referenced
 const orphaned = [...declaredResids.keys()].filter(id => !usedResids.has(id));
 orphaned.length === 0
   ? addOk("No orphaned (unreferenced) resource IDs")
-  : orphaned.forEach(id => addWarning(`Orphaned resource ID "${id}" declared but never referenced`));
+  : orphaned.forEach(id => addInfo(`Orphaned resource ID "${id}" declared but never referenced`));
+
+// Type-mismatch: resid resolves but to the wrong resource type
+let typeMismatches = 0;
+
+residUsages.forEach(({ parent, resid }) => {
+  const expected = RESID_TYPE_EXPECTATIONS[parent];
+  if (!expected) return;
+  const actual = declaredResids.get(resid);
+  if (!actual) return; // already reported as unresolved above
+  if (!actual.includes(expected)) {
+    addError(`<${parent} resid="${resid}"> expects a ${expected} resource but found ${actual.join(", ")}`);
+    typeMismatches++;
+  }
+});
+
+if (typeMismatches === 0 && broken.length === 0) {
+  addOk("All resid references point to the correct resource type (ShortString/LongString/Url/Image)");
+}
+stageEnd("Pass 2a · Resource ID integrity");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PASS 2b — Control & group ID uniqueness
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log(fmt.head("Pass 2b · Control & group ID uniqueness"));
+stageStart();
 
 // All @_id values that are NOT resource IDs (those are in bt:* elements)
 const allIds = collectAttribs(doc, "@_id");
@@ -217,11 +327,13 @@ const dupControls = [...idCount.entries()].filter(([, c]) => c > 1);
 dupControls.length === 0
   ? addOk("No duplicate control/group IDs")
   : dupControls.forEach(([id, c]) => addError(`Duplicate id="${id}" appears ${c}×`));
+stageEnd("Pass 2b · Control & group ID uniqueness");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PASS 2c — Required top-level manifest fields
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log(fmt.head("Pass 2c · Required manifest fields"));
+stageStart();
 
 const REQUIRED = ["Id", "Version", "ProviderName", "DefaultLocale", "DisplayName", "Description"];
 const root = doc["OfficeApp"]?.[0] ?? {};
@@ -247,11 +359,13 @@ if (idStr && !GUID_RE.test(idStr.trim())) {
 } else if (idStr) {
   addOk(`<Id> is a valid GUID`);
 }
+stageEnd("Pass 2c · Required manifest fields");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PASS 2d — FunctionFile / ExecuteFunction consistency
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log(fmt.head("Pass 2d · FunctionFile consistency"));
+stageStart();
 
 const functionFiles  = collectElements(doc, "FunctionFile");
 const execActions    = collectElements(doc, "Action")
@@ -282,14 +396,17 @@ if (functionFiles.length === 0 && execActions.length > 0) {
 if (funcNames.size > 0) {
   addInfo(`Function names declared: ${[...funcNames].join(", ")}`);
 }
+stageEnd("Pass 2d · FunctionFile consistency");
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PASS 2e — URL reachability
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log(fmt.head("Pass 2e · URL reachability"));
+stageStart();
 
 if (SKIP_URLS) {
   addInfo("URL checks skipped (--skip-urls)");
+  stageEnd("Pass 2e · URL reachability");
 } else {
   const urlMap = new Map(); // url → resId
 
@@ -298,11 +415,15 @@ if (SKIP_URLS) {
     const url = el["@_DefaultValue"];
     if (url) urlMap.set(url, el["@_id"] ?? "bt:Url");
   });
-  collectElements(doc, "Image").forEach(el => {
-    if (!el || typeof el !== "object") return;
-    const url = el["@_DefaultValue"];
-    if (url) urlMap.set(url, el["@_id"] ?? "bt:Image");
-  });
+  if (CHECK_IMAGES) {
+    collectElements(doc, "Image").forEach(el => {
+      if (!el || typeof el !== "object") return;
+      const url = el["@_DefaultValue"];
+      if (url) urlMap.set(url, el["@_id"] ?? "bt:Image");
+    });
+  } else {
+    addInfo("Skipping bt:Image URL checks (use --check-images to include)");
+  }
 
   const isLocal = (url) => /localhost|127\.\d+\.\d+\.\d+|::1/.test(url);
   const targets = [...urlMap.entries()].filter(([url]) => ONLY_LOCAL ? isLocal(url) : true);
@@ -328,16 +449,15 @@ if (SKIP_URLS) {
         if (res.ok || res.status === 405) {
           addOk(`HTTP ${res.status}  ${label}`);
         } else if (res.status >= 400) {
-          addError(`HTTP ${res.status}  ${label}`);
+          addWarning(`HTTP ${res.status}  ${label}`);
         } else {
           addWarning(`HTTP ${res.status}  ${label}`);
         }
       } catch (e) {
         clearTimeout(timer);
         const reason = e.name === "AbortError" ? `timeout after ${TIMEOUT_MS}ms` : e.message;
-        isLocal(url)
-          ? addWarning(`Unreachable (${reason})  ${label}  ${fmt.grey("← local dev server, may not be running")}`)
-          : addError(`Unreachable (${reason})  ${label}`);
+        const suffix = isLocal(url) ? `  ${fmt.grey("← local dev server, may not be running")}` : "";
+        addWarning(`Unreachable (${reason})  ${label}${suffix}`);
       }
     };
 
@@ -347,8 +467,11 @@ if (SKIP_URLS) {
     }
   }
 
+  stageEnd("Pass 2e · URL reachability");
+
   // ── PASS 2f — AppDomain coverage ───────────────────────────────────────────
   console.log(fmt.head("Pass 2f · AppDomain coverage"));
+  stageStart();
 
   const appDomains = collectElements(doc, "AppDomain").map(el =>
     typeof el === "string" ? el.trim() : String(el?.["#text"] ?? "").trim());
@@ -370,6 +493,7 @@ if (SKIP_URLS) {
         : addWarning(`Host "${origin}" used in resources but not in <AppDomains>`);
     });
   }
+  stageEnd("Pass 2f · AppDomain coverage");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
