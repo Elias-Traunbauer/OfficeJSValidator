@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Office Add-in Manifest Validator</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1><span class="accent">&gt;_</span> Manifest Validator</h1>
+      <p class="subtitle">Office Add-in XML manifest analysis &mdash; client-side, no uploads</p>
+    </header>
+
+    <div id="dropzone" class="dropzone">
+      <div class="dropzone-content">
+        <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <p class="dropzone-text">Drop manifest XML here</p>
+        <p class="dropzone-hint">or click to browse</p>
+      </div>
+      <input type="file" id="fileInput" accept=".xml" hidden>
+    </div>
+
+    <div id="filename" class="filename" hidden></div>
+
+    <div id="results" class="results" hidden>
+      <div id="summary" class="summary"></div>
+      <div id="passes"></div>
+      <div class="skipped-note">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+          <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+        </svg>
+        Microsoft schema validation (Pass 1) and URL reachability (Pass 2e) require the CLI tool:
+        <code>npx officejs-manifest-validator manifest.xml</code>
+      </div>
+    </div>
+
+    <footer>
+      <a href="https://github.com/Elias-Traunbauer/OfficeJSValidator" target="_blank">GitHub</a>
+      <span class="sep">/</span>
+      <a href="https://www.npmjs.com/package/officejs-manifest-validator" target="_blank">npm</a>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
